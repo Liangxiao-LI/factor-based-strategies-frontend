@@ -1,0 +1,14 @@
+# Dependencies and build output
+node_modules/
+dist/
+
+# Local environment (keep the example)
+.env*
+!.env.example
+
+# Logs and editors
+*.log
+.DS_Store
+.vscode/*
+!.vscode/extensions.json
+.idea

@@ -1,0 +1,21 @@
+# systemd unit that keeps the backend running on EC2
+# Copy to /etc/systemd/system/fbs-api.service, then:
+#   sudo systemctl daemon-reload && sudo systemctl enable --now fbs-api
+# Adjust User and paths if the backend repo lives elsewhere
+
+[Unit]
+Description=fbs API (factor-based-strategies backend)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+User=ec2-user
+WorkingDirectory=/home/ec2-user/factor-based-strategies
+# 127.0.0.1 only: nginx reaches it locally, port 8000 stays closed to the internet.
+# One process only: download jobs live in its memory
+ExecStart=/home/ec2-user/factor-based-strategies/.venv/bin/uvicorn fbs.api.main:app --app-dir src --env-file .env --host 127.0.0.1 --port 8000
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
