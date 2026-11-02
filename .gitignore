@@ -12,3 +12,8 @@ dist/
 .vscode/*
 !.vscode/extensions.json
 .idea
+
+# SSH keys
+*.pem
+
+

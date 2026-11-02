@@ -2,6 +2,12 @@ import { useEffect, useState } from 'react'
 import { listFiles, type FileInfo } from '../api'
 import { formatBytes, formatTime } from '../format'
 
+// nginx serves data/bronze/ under /files/bronze/ (see deploy/nginx.conf); the
+// dev server does not, so these links only work on EC2
+function fileUrl(path: string) {
+  return '/files/' + path.split('/').map(encodeURIComponent).join('/')
+}
+
 // Downloaded files in data/bronze/. The list reloads whenever refreshKey
 // changes, which the parent bumps when a download finishes
 export default function FileList({ refreshKey }: { refreshKey: number }) {
@@ -38,7 +44,7 @@ export default function FileList({ refreshKey }: { refreshKey: number }) {
           <tbody>
             {files.map((f) => (
               <tr key={f.path}>
-                <td><code>{f.path}</code></td>
+                <td><a href={fileUrl(f.path)} download><code>{f.path}</code></a></td>
                 <td className="num">{formatBytes(f.size)}</td>
                 <td>{formatTime(f.modified_at)}</td>
               </tr>

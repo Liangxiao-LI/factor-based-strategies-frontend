@@ -88,19 +88,49 @@ VITE_API_TARGET=http://192.168.1.10:8000 npm run dev
                           └─ /api/... → 127.0.0.1:8000（uvicorn，systemd 常驻）
 ```
 
-### 1. 安全组
+### 1. 在 AWS Console 创建实例
 
-入站规则只开：
+1. 登录 AWS Console，先在右上角选好区域（Region），例如 `Asia Pacific (Tokyo)`。实例、密钥对、安全组都按区域区分，之后要在同一个区域里找它们
+2. 顶部搜索框输入 `EC2`，进入 EC2 控制台，点橙色的 **Launch instance**
+3. **Name and tags**：填一个名字，例如 `fbs`
+4. **Application and OS Images (AMI)**：选 **Amazon Linux**，下拉框选 **Amazon Linux 2023 AMI**，架构选 **64-bit (x86)**
+5. **Instance type**：选 `t3.small`（2 GiB 内存）。`t3.micro` / `t2.micro`（1 GiB）在免费套餐内，但 `npm ci` 和 `npm run build` 可能因为内存不够被杀掉，要用的话先加 swap：
 
-- 22（SSH）：来源限定为你自己的 IP
-- 80 / 443（HTTP / HTTPS）：**后端没有鉴权**，任何能打开页面的人都能发起下载、消耗你的 Sharadar 额度。最好把来源限定为你自己的 IP（`x.x.x.x/32`）；需要从不固定的地方访问时，开 `0.0.0.0/0`，但一定要配置下面第 6 步的 basic auth
+   ```bash
+   sudo dd if=/dev/zero of=/swapfile bs=1M count=2048
+   sudo chmod 600 /swapfile && sudo mkswap /swapfile && sudo swapon /swapfile
+   ```
 
-不要开放 8000 端口：后端只监听 127.0.0.1，由 nginx 在本机转发。
+6. **Key pair (login)**：点 **Create new key pair**，名字填 `fbs-key`，类型 **RSA**，格式 **.pem**，点 **Create key pair**，浏览器会下载 `fbs-key.pem`。这个文件只能下载这一次，丢了就只能换密钥对
+7. **Network settings**：点右上角 **Edit**
+   - **VPC** 用默认的，**Auto-assign public IP** 选 **Enable**
+   - **Firewall (security groups)** 选 **Create security group**，名字填 `fbs-sg`
+   - 默认已有一条 `ssh` 规则：**Source type** 改成 **My IP**
+   - 点 **Add security group rule**，**Type** 选 `HTTP`（80），**Source type** 选 **My IP**
+   - 再加一条 `HTTPS`（443），同样选 **My IP**（以后配 HTTPS 时用）
+
+   **后端没有鉴权**，任何能打开页面的人都能发起下载、消耗你的 Sharadar 额度，所以 80/443 最好只对自己的 IP 开。需要从不固定的地方访问时可以改成 `Anywhere`（`0.0.0.0/0`），但一定要配置下面第 6 步的 basic auth。**不要开 8000 端口**：后端只监听 127.0.0.1，由 nginx 在本机转发
+8. **Configure storage**：改成 `20` GiB、`gp3`。下载的数据都放在后端仓库的 `data/` 目录里，默认的 8 GiB 很快就会用完
+9. 右侧点 **Launch instance**，然后点 **View all instances**。等 **Instance state** 变成 `Running`、**Status check** 显示所有检查都通过
+10. 选中实例，在下方 **Details** 里复制 **Public IPv4 address**
+
+    这个公网 IP 在实例 stop 再 start 之后会变。想要固定 IP：左侧菜单 **Network & Security → Elastic IPs → Allocate Elastic IP address → Allocate**，然后选中它，**Actions → Associate Elastic IP address**，选这台实例。注意 AWS 对公网 IPv4 地址按小时收费；Elastic IP 不用了要 **Release**
+
+11. 在本机 SSH 登录：
+
+    ```bash
+    chmod 400 ~/Downloads/fbs-key.pem
+    ssh -i ~/Downloads/fbs-key.pem ec2-user@<EC2 公网 IP>
+    ```
+
+    连不上（超时）一般是你的 IP 变了：**EC2 → Security Groups → fbs-sg → Inbound rules → Edit inbound rules**，把各条规则的来源重新选一次 **My IP**，保存。Console 里的 **Connect → EC2 Instance Connect** 是从 AWS 的地址发起连接的，22 端口只对自己 IP 开放时用不了，用上面的 `ssh` 命令即可
+
+不用的时候在实例列表里 **Instance state → Stop instance** 可以停掉计费（EBS 磁盘仍按容量收费）；**Terminate** 会连磁盘一起删掉，数据无法恢复。
 
 ### 2. 安装 Node、nginx、git、Python
 
 ```bash
-sudo dnf install -y nginx git python3.12
+sudo dnf install -y nginx git python3.12 make
 sudo systemctl enable --now nginx
 
 # Node 用 nvm 装（只用于构建前端）
@@ -148,19 +178,33 @@ unit 里运行的是：
 ### 5. 配置 nginx
 
 ```bash
-sudo cp deploy/nginx.conf /etc/nginx/conf.d/fbs.conf
+sudo cp ~/factor-based-strategies-frontend/deploy/nginx.conf /etc/nginx/conf.d/fbs.conf
 # Amazon Linux 的家目录默认是 700，nginx 用户进不去，读不到 dist/
 chmod o+x /home/ec2-user
+# nginx 自带的欢迎页站点（在 nginx.conf 里）如果标了 default_server，会和 fbs.conf 冲突，去掉它
+sudo cp /etc/nginx/nginx.conf /etc/nginx/nginx.conf.bak
+sudo sed -i 's/ default_server//' /etc/nginx/nginx.conf
 sudo nginx -t && sudo systemctl reload nginx
 ```
 
-浏览器打开 `http://<EC2 公网 IP>/` 即可。
+安全组的 80 端口对 Anywhere 开放时，先做完第 6 步再 `reload`，否则从 reload 到配好密码之间，任何人都能调用后端。
 
-`deploy/nginx.conf` 做了三件事：
+`nginx -t` 可能会提示 `conflicting server name "_" on 0.0.0.0:80, ignored`，可以忽略：`fbs.conf` 用的是 `listen 80 default_server`，不带域名的请求都会交给它。确认一下：
+
+```bash
+curl -I http://127.0.0.1/api/tables  # 不要用 localhost：它可能走 IPv6，而 fbs.conf 只监听 IPv4。配了 basic auth 应返回 401，没配应返回 200；返回 404 且页面是 "Welcome to nginx" 说明还是自带站点在响应
+```
+
+然后浏览器打开 `http://<EC2 公网 IP>/` 即可。
+
+`deploy/nginx.conf` 做了四件事：
 
 - `root` 指向 `dist/`
 - `location /api/` 用 `proxy_pass http://127.0.0.1:8000` 转发给后端（端口后面不加 `/`，转发时保留 `/api` 前缀）
+- `location /files/bronze/` 用 `alias` 直接提供后端仓库 `data/bronze/` 里的文件，页面"已下载文件"列表里的链接就指向这里。只开放 `bronze/`，`data/` 下其他目录不对外
 - `try_files $uri $uri/ /index.html` 让所有其他路径回退到 `index.html`
+
+所有登录的人共用同一个 `data/bronze/`，能看到并下载彼此的文件。
 
 如果页面显示 502：检查 `systemctl status fbs-api`。如果系统开启了 SELinux（`getenforce` 显示 `Enforcing`），还需要执行 `sudo setsebool -P httpd_can_network_connect 1`，允许 nginx 访问 8000 端口。
 
@@ -187,6 +231,6 @@ cd ~/factor-based-strategies && git pull && .venv/bin/pip install -e . && sudo s
 
 ## 已知限制
 
-- 后端没有下载文件内容的接口，页面只显示文件在服务器上的路径（相对后端仓库的 `data/` 目录）和大小
+- 后端没有下载文件内容的接口，文件由 nginx 直接提供，所以 `npm run dev` 时"已下载文件"里的链接打不开（404），只有部署到 EC2 后才能下载
 - 任务只保存在后端内存里，后端重启后就没有了
 - 过滤值都按字符串发送；只有日期列支持起止范围，数值列不支持 `gt`/`lt` 范围过滤
